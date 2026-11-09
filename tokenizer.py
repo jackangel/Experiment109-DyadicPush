@@ -50,11 +50,18 @@ class BPETokenizerWrapper:
     """Wrapper around HuggingFace tokenizers BPE implementation."""
     def __init__(self, tokenizer):
         self.tokenizer = tokenizer
+        # Ensure ByteLevel decoder is attached so tokens decode to human-readable text
+        try:
+            from tokenizers import decoders
+            if self.tokenizer.decoder is None:
+                self.tokenizer.decoder = decoders.ByteLevel()
+        except Exception:
+            pass
 
     @classmethod
     def train_from_file(cls, file_path: str, vocab_size: int = 8192, save_path: Optional[str] = None) -> "BPETokenizerWrapper":
         try:
-            from tokenizers import Tokenizer, models, pre_tokenizers, trainers
+            from tokenizers import Tokenizer, decoders, models, pre_tokenizers, trainers
         except ImportError:
             raise ImportError(
                 "The 'tokenizers' library is required for BPE. Install with: pip install tokenizers"
@@ -62,6 +69,7 @@ class BPETokenizerWrapper:
 
         tokenizer = Tokenizer(models.BPE(unk_token="<unk>"))
         tokenizer.pre_tokenizer = pre_tokenizers.ByteLevel(add_prefix_space=False)
+        tokenizer.decoder = decoders.ByteLevel()
         trainer = trainers.BpeTrainer(
             vocab_size=vocab_size,
             special_tokens=["<unk>", "<s>", "</s>", "<pad>"],
@@ -75,7 +83,19 @@ class BPETokenizerWrapper:
     @classmethod
     def from_file(cls, json_path: str) -> "BPETokenizerWrapper":
         from tokenizers import Tokenizer
-        tokenizer = Tokenizer.from_file(json_path)
+        try:
+            tokenizer = Tokenizer.from_file(json_path)
+        except Exception:
+            # Cross-version compatibility for differences in merges serialization
+            with open(json_path, "r", encoding="utf-8") as f:
+                raw = json.load(f)
+            if "model" in raw and "merges" in raw["model"]:
+                merges = raw["model"]["merges"]
+                if merges and isinstance(merges[0], list):
+                    raw["model"]["merges"] = [" ".join(m) for m in merges]
+                elif merges and isinstance(merges[0], str):
+                    raw["model"]["merges"] = [m.split(" ", 1) for m in merges]
+            tokenizer = Tokenizer.from_str(json.dumps(raw))
         return cls(tokenizer)
 
     @property
@@ -86,7 +106,22 @@ class BPETokenizerWrapper:
         return self.tokenizer.encode(text).ids
 
     def decode(self, tokens: List[int]) -> str:
-        return self.tokenizer.decode(tokens)
+        text = self.tokenizer.decode(tokens)
+        if "Ġ" in text or "Ċ" in text:
+            try:
+                from tokenizers import decoders
+                self.tokenizer.decoder = decoders.ByteLevel()
+                text = self.tokenizer.decode(tokens)
+            except Exception:
+                pass
+            if "Ġ" in text or "Ċ" in text:
+                text = (
+                    text.replace("Ġ", " ")
+                    .replace("Ċ", "\n")
+                    .replace("ĉ", "\t")
+                    .replace("č", "\r")
+                )
+        return text
 
     def to_json_str(self) -> str:
         return self.tokenizer.to_str()
@@ -94,7 +129,18 @@ class BPETokenizerWrapper:
     @classmethod
     def from_json_str(cls, json_str: str) -> "BPETokenizerWrapper":
         from tokenizers import Tokenizer
-        return cls(Tokenizer.from_str(json_str))
+        try:
+            tokenizer = Tokenizer.from_str(json_str)
+        except Exception:
+            raw = json.loads(json_str)
+            if "model" in raw and "merges" in raw["model"]:
+                merges = raw["model"]["merges"]
+                if merges and isinstance(merges[0], list):
+                    raw["model"]["merges"] = [" ".join(m) for m in merges]
+                elif merges and isinstance(merges[0], str):
+                    raw["model"]["merges"] = [m.split(" ", 1) for m in merges]
+            tokenizer = Tokenizer.from_str(json.dumps(raw))
+        return cls(tokenizer)
 
 
 def load_or_create_tokenizer(
